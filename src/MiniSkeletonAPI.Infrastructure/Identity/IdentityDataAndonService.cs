@@ -58,7 +58,7 @@ public class IdentityDataAndonService : IIdentityDataAndonService
     public async Task<Result> UpdateDetail(CancellationToken token)
     {
         //var dataAndon = _context.DataAndons.Where(a=> a.Antrian == "prosess").OrderBy(a=> a.CreatedAt).FirstOrDefault();
-        var batasWaktu = DateTime.UtcNow.AddHours(+2);
+        var batasWaktu = DateTime.UtcNow.AddHours(-7);
 
         var dataAndon = _context.DataAndons
             .Where(a => a.Antrian == "prosess" && a.CreatedAt >= batasWaktu)
@@ -183,7 +183,7 @@ public class IdentityDataAndonService : IIdentityDataAndonService
         var dataCount = _context.DataCounts.FirstOrDefault()?.CountNumber ?? 0;
 
         var data = await _context.DataAndonDetails
-            .Where(x => x.CreatedAt >= today && x.CreatedAt < tomorrow)
+            .Where(x => x.CreatedAt >= today && x.CreatedAt < tomorrow && x.CountNumber>0)
             .OrderByDescending(x => x.CreatedAt)
             .ToListAsync();
         var result = _context.Settings.AsQueryable();
@@ -197,7 +197,9 @@ public class IdentityDataAndonService : IIdentityDataAndonService
             Repair = x.Repair,
             LotMaterial = x.LotMaterial,
             Description = x.Description,
-            CreatedAt = x.CreatedAt.ToString(),
+            CreatedAt = x.CreatedAt.HasValue
+            ? x.CreatedAt.Value.AddHours(7).ToString("yyyy-MM-dd HH:mm:ss")
+            : null,
             Coler = x.Coler,
             Qty = x.Qty,
             Locaton = DataLocation(DataLocationNo(dataCount, x.CountNumber ?? 0, x.Id, token, max), result).status,

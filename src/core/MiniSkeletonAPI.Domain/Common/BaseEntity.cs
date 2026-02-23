@@ -7,7 +7,7 @@ public abstract class BaseEntity
     // This can easily be modified to be BaseEntity<T> and public T Id to support different key types.
     // Using non-generic integer types for simplicity
     public Guid Id { get; set; }
-    public DateTime? CreatedAt { get; set; } = DateTime.UtcNow.AddHours(7);
+    public DateTime? CreatedAt { get; set; } = DateTime.UtcNow.AddHours(0);
 
     private readonly List<BaseEvent> _domainEvents = new();
 

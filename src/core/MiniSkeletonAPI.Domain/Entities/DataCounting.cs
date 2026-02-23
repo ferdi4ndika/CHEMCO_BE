@@ -7,7 +7,7 @@ namespace MiniSkeletonAPI.Domain.Entities
         public int? CountNumber { get; set; }
         public float? Speed { get; set; }
 
-        public MWarna? data {  get; set; }
+        //public MWarna? data {  get; set; }
 
     }
 }
