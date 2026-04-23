@@ -19,14 +19,16 @@ namespace MiniSkeletonAPI.Infrastructure.Identity;
 public class IdentityDataAndonService : IIdentityDataAndonService
 {
     private readonly IApplicationDbContext _context;
+    private readonly IMqttClientService _mqttClientService;
     private readonly IMapper _mapper;
 
 
 
-    public IdentityDataAndonService(IApplicationDbContext context, IMapper mapper)
+    public IdentityDataAndonService(IApplicationDbContext context, IMapper mapper, IMqttClientService mqttClient)
     {
         _context = context;
         _mapper = mapper;
+        _mqttClientService = mqttClient;
       
     }
 
@@ -74,15 +76,15 @@ public class IdentityDataAndonService : IIdentityDataAndonService
                 _context.DataAndons.Update(dataAndon);
 
             }
-            var dataDetail= _context.DataAndonDetails.Where(a => a.IdAndon == dataAndon.Id && a.CountNumber == 0).FirstOrDefault();
+            var dataDetail= _context.DataAndonDetails.Where(a => a.IdAndon == dataAndon.Id && a.CountNumber == 0).OrderByDescending(a=> a.Qty).FirstOrDefault();
             var dataCount = _context.DataCounts.FirstOrDefault()?.CountNumber;
             if (dataDetail == null)
             {
                 dataAndon.Antrian = "sukses";
-                var dataAndonNew = _context.DataAndons.Where(a => a.Antrian == "prosess" && a.Id != dataAndon.Id).OrderBy(a => a.CreatedAt).FirstOrDefault();
+                var dataAndonNew = _context.DataAndons.Where(a => a.Antrian == "prosess" && a.Id != dataAndon.Id  && a.CreatedAt >= batasWaktu).OrderBy(a => a.CreatedAt).FirstOrDefault();
                 _context.DataAndons.Update(dataAndon);
                 if (dataAndonNew != null) {
-                    dataDetail = _context.DataAndonDetails.Where(a => a.IdAndon == dataAndonNew.Id && a.CountNumber == 0).FirstOrDefault();
+                    dataDetail = _context.DataAndonDetails.Where(a => a.IdAndon == dataAndonNew.Id && a.CountNumber == 0).OrderByDescending(a => a.Qty).FirstOrDefault();
                     if (dataAndon.StarProsess == null)
                     {
                         dataAndon.StarProsess = DateTime.Now;
@@ -90,6 +92,7 @@ public class IdentityDataAndonService : IIdentityDataAndonService
 
                     }
                     dataDetail.CountNumber = dataCount;
+                    dataDetail.Step1 = DateTime.UtcNow.AddHours(0);
                     _context.DataAndonDetails.Update(dataDetail);
                 }
 
@@ -98,6 +101,7 @@ public class IdentityDataAndonService : IIdentityDataAndonService
             {
 
                 dataDetail.CountNumber = dataCount;
+                dataDetail.Step1 = DateTime.UtcNow.AddHours(0);
                 _context.DataAndonDetails.Update(dataDetail);
             }
            await _context.SaveChangesAsync(token);
@@ -149,6 +153,7 @@ public class IdentityDataAndonService : IIdentityDataAndonService
                 dataCounts.CountNumber = dataCounts.CountNumber + 1;
                 if (dataCounts.CountNumber + 1 > max + 1)
                     dataCounts.CountNumber = 1;
+                    
             }
             else
             {
@@ -181,6 +186,20 @@ public class IdentityDataAndonService : IIdentityDataAndonService
         var tomorrow = today.AddDays(1);
 
         var dataCount = _context.DataCounts.FirstOrDefault()?.CountNumber ?? 0;
+        var settings = _context.Settings.ToList();
+
+        var expandedData = settings.SelectMany(s =>
+                Enumerable.Range(s.StartRage ?? 0, (s.EndRage - s.StartRage + 1) ?? 0)
+               .Select(i => new DataAndonDetailBriefDto
+               {
+                   LocatonNo = i,
+                   Locaton = s.Name,
+                   ColerLocation = s.Coler,
+                   Repair = "_" 
+               })
+           )
+           .OrderBy(x => x.LocatonNo)
+           .ToList();
 
         var data = await _context.DataAndonDetails
             .Where(x => x.CreatedAt >= today && x.CreatedAt < tomorrow && x.CountNumber>0)
@@ -189,7 +208,8 @@ public class IdentityDataAndonService : IIdentityDataAndonService
         var result = _context.Settings.AsQueryable();
         int max = result.Max(a => a.EndRage).Value;
 
-        return data.Select(x => new DataAndonDetailBriefDto
+
+       var datas = data.Select(x => new DataAndonDetailBriefDto
         {
             Id = x.Id,
             PartName = x.PartName,
@@ -197,8 +217,8 @@ public class IdentityDataAndonService : IIdentityDataAndonService
             Repair = x.Repair,
             LotMaterial = x.LotMaterial,
             Description = x.Description,
-            CreatedAt = x.CreatedAt.HasValue
-            ? x.CreatedAt.Value.AddHours(7).ToString("yyyy-MM-dd HH:mm:ss")
+            CreatedAt = x.Step1.HasValue
+            ? x.Step1.Value.AddHours(7).ToString("yyyy-MM-dd HH:mm:ss")
             : null,
             Coler = x.Coler,
             Qty = x.Qty,
@@ -208,6 +228,20 @@ public class IdentityDataAndonService : IIdentityDataAndonService
             LocatonNo = DataLocationNo(dataCount, x.CountNumber ?? 0, x.Id, token, max)
 
         }).OrderBy(a=> a.LocatonNo).ToList();
+
+        var existingLocationNos = datas.Select(d => d.LocatonNo).ToHashSet();
+
+        var filteredExpanded = expandedData
+            .Where(e => !existingLocationNos.Contains(e.LocatonNo))
+            .ToList();
+
+        var finalResult = datas
+      .Concat(filteredExpanded)
+      .Where(x => x.LocatonNo != 0) 
+      .OrderBy(x => x.LocatonNo)
+      .ToList();
+
+        return finalResult;
     }
     public async Task<PaginatedList<DataAndonDetailBriefDto>> GetDataAndonPafinationAsync(CancellationToken token)
     {
@@ -232,7 +266,7 @@ public class IdentityDataAndonService : IIdentityDataAndonService
                 LotMaterial = x.LotMaterial,
                 Description = x.Description,
                 Coler = x.Coler,
-                CreatedAt = x.CreatedAt.ToString(),
+                CreatedAt = x.Step1.ToString(),
                 LocatonNo = DataLocationNo(
                     dataCount,
                     x.CountNumber ?? 0,

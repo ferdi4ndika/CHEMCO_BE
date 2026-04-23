@@ -169,8 +169,9 @@ namespace MiniSkeletonAPI.Infrastructure
             services.AddTransient<IIdentityMasterdataPartService, IdentityPartService>();
             services.AddTransient<IIdentityImageService, IdentityImageService>();
             services.AddTransient<IIdentityMWarnaService, IdentityMWarnaService>();
-            services.AddTransient<IIdentityMRepairService, IdentityMRepairService>();
-            services.AddTransient<IMqttClientService, MqttClientService>();
+            services.AddTransient<IIdentityMRepairService, IdentityMRepairService>(); 
+            services.AddSingleton<IMqttClientService, MqttClientService>();
+            //services.AddTransient<IMqttClientService, MqttClientService>();
             services.AddTransient<IIdentityAuthService, IdentityAuthService>();
             //    services.AddTransient<ImageUpdateBackgroundService>();
             //  services.AddT

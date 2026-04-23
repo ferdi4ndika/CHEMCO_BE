@@ -29,10 +29,12 @@ namespace MiniSkeletonAPI.Application.Identity.DataAndons.Commands.CreateDataAnd
     public class CreateDataAndonCommandHandler : IRequestHandler<CreateDataAndonCommand, Guid>
     {
         private readonly IApplicationDbContext _context;
+        private readonly IMqttClientService _mqttClientService;
 
-        public CreateDataAndonCommandHandler(IApplicationDbContext context)
+        public CreateDataAndonCommandHandler(IApplicationDbContext context, IMqttClientService mqttClientService)
         {
             _context = context;
+            _mqttClientService = mqttClientService;
         }
 
         public async Task<Guid> Handle(CreateDataAndonCommand request, CancellationToken cancellationToken)
@@ -45,6 +47,10 @@ namespace MiniSkeletonAPI.Application.Identity.DataAndons.Commands.CreateDataAnd
             float dataSpeed = (await _context.DataCounts
                .Select(x => x.Speed)
                .FirstOrDefaultAsync()) ?? 0f;
+            if (dataSpeed < 1)
+            {
+                dataSpeed = 3;
+            }
 
 
             var dataAndon = new DataAndon
@@ -65,6 +71,7 @@ namespace MiniSkeletonAPI.Application.Identity.DataAndons.Commands.CreateDataAnd
 
 
             };
+
             List<DataAndonDetail> dataAndonDetails = new List<DataAndonDetail>();
                   int qtyPerHangar = dataPart?.Qty ?? 0;
                     int sisaQty = request.QtyPart ?? 0;
@@ -111,6 +118,8 @@ namespace MiniSkeletonAPI.Application.Identity.DataAndons.Commands.CreateDataAnd
             await  _context.DataAndonDetails.AddRangeAsync(dataAndonDetails);
    
             await _context.SaveChangesAsync(cancellationToken);
+            await _mqttClientService.StartAsync();
+            await _mqttClientService.PublishAsync("data/loading",dataAndon);
 
             return dataAndon.Id;
         }

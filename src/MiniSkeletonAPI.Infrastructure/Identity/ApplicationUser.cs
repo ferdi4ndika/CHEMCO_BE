@@ -14,6 +14,8 @@ public class ApplicationUser : IdentityUser
     public string? RefreshToken { get; set; }
     public string Nik { get; set; }
     public string Role { get; set; }
+
+
     [NotMapped] 
     public override string? Email { get; set; } = null;
 

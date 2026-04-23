@@ -53,7 +53,7 @@ namespace MiniSkeletonAPI.Presentation.Controllers
                     Console.WriteLine($"❌ [SignalR Error] {ex.Message}");
                 }
 
-                await Task.Delay(TimeSpan.FromSeconds(1), stoppingToken);
+                await Task.Delay(TimeSpan.FromSeconds(5), stoppingToken);
             }
         }
     }

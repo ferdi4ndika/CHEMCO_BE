@@ -3,21 +3,23 @@
 using Asp.Versioning;
 using Asp.Versioning.Builder;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
+using Microsoft.AspNetCore.Diagnostics;
 using Microsoft.AspNetCore.Http.Features;
 using Microsoft.IdentityModel.Tokens;
 using MiniSkeletonAPI.Application;
+using MiniSkeletonAPI.Application.Common.Exceptions;
+using MiniSkeletonAPI.Application.Common.Interfaces;
 using MiniSkeletonAPI.Infrastructure;
 using MiniSkeletonAPI.Infrastructure.Data;
-using MiniSkeletonAPI.Presentation;
-//using MiniSkeletonAPI.Presentation.Endpoints;
-using MiniSkeletonAPI.Presentation.Hubs;using System.Text;
-using MiniSkeletonAPI.Presentation.Extentions;
-using MiniSkeletonAPI.Presentation.Controllers;
 using MiniSkeletonAPI.Infrastructure.Identity;
+using MiniSkeletonAPI.Presentation;
+using MiniSkeletonAPI.Presentation.Controllers;
+using MiniSkeletonAPI.Presentation.Extentions;
+//using MiniSkeletonAPI.Presentation.Endpoints;
+using MiniSkeletonAPI.Presentation.Hubs;
 using MiniSkeletonAPI.Presentation.Services;
-using Microsoft.AspNetCore.Diagnostics;
-using MiniSkeletonAPI.Application.Common.Exceptions;
 using System.Net;
+using System.Text;
 using System.Text.Json;
 var builder = WebApplication.CreateBuilder(args);
 builder.WebHost.ConfigureKestrel(options =>
@@ -33,7 +35,8 @@ builder.Services.AddInfrastructureServices(builder.Configuration);
 builder.Services.ConfigureJWT(builder.Configuration);
 builder.Services.ConfigureCorsPolicy(builder.Configuration);
 builder.Services.AddWebServices();
-builder.Services.AddHostedService<MqttBackgroundService>();
+//builder.Services.AddHostedService<MqttBackgroundService>();
+
 
 //builder.Services.AddWebServices(builder.Configuration);
 
@@ -41,6 +44,7 @@ builder.Services.AddAntiforgery();
 builder.Services.AddLogging();
 builder.Services.AddControllers();
 builder.Services.AddHostedService<DataAndonRealtimeService>();
+builder.Services.AddHostedService<RealTimeHubExcelService>();
 builder.Services.AddHostedService<DataAndonDetailRealtimeService>();
 //builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
 //    .AddJwtBearer(options =>
@@ -103,7 +107,14 @@ app.UseReDoc(options =>
 {
     options.Path = "/redoc";
 });
+var mqttService = app.Services.GetRequiredService<IMqttClientService>();
+await mqttService.StartAsync();
 
+mqttService.MessageReceived += payload =>
+{
+    Console.WriteLine($"Pesan diterima: {payload}");
+    // Bisa langsung update DB atau publish ke SignalR
+};
 //app.UseExceptionHandler(options => { });
 app.UseExceptionHandler("/error");
 app.UseExceptionHandler(appError =>
@@ -140,6 +151,7 @@ app.UseExceptionHandler(appError =>
 
 
 
+app.MapHub<RealTimeHubExcel>("/hub-andon-excel");
 app.MapHub<RealTimeHub>("/hub-andon-data");
 app.MapHub<RealTimeHubDetail>("/hub-andon-data-detail");
 

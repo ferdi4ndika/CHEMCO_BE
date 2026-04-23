@@ -5,9 +5,11 @@ using MQTTnet;
 using MQTTnet.Client;
 using MQTTnet.Extensions.ManagedClient;
 using MQTTnet.Packets;
+using MQTTnet.Protocol;
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
-using System.Diagnostics.Metrics;
+using System.Linq;
 using System.Text;
 using System.Text.Json;
 using System.Threading;
@@ -15,174 +17,222 @@ using System.Threading.Tasks;
 
 namespace MiniSkeletonAPI.Infrastructure.Identity
 {
-    public class MqttClientService : IMqttClientService
+    public class MqttClientService : IMqttClientService, IDisposable
     {
         private readonly MqttSettings _mqttSettings;
         private readonly IManagedMqttClient _mqttClient;
         private readonly IServiceScopeFactory _scopeFactory;
 
-        // Event untuk notify listener lain
         public event Action<string> MessageReceived;
 
-        private  DateTime? _startTime = null;
+        private readonly List<int> _speedBuffer = new();
+        private readonly TimeSpan _speedInterval = TimeSpan.FromMinutes(10);
+        private DateTime _lastSpeedSaveTime = DateTime.UtcNow;
 
-        public MqttClientService(
-            IConfiguration configuration,
-            IServiceScopeFactory scopeFactory)
+        private DateTime? _startTime = null;
+        private bool _isStarted = false;
+
+        private readonly ConcurrentDictionary<string, object> _latestData = new();
+
+        public MqttClientService(IConfiguration configuration, IServiceScopeFactory scopeFactory)
         {
             _mqttSettings = configuration.GetSection("MqttBrokerSettings").Get<MqttSettings>();
             _scopeFactory = scopeFactory ?? throw new ArgumentNullException(nameof(scopeFactory));
 
-            var mqttFactory = new MqttFactory();
-            _mqttClient = mqttFactory.CreateManagedMqttClient();
+            var factory = new MqttFactory();
+            _mqttClient = factory.CreateManagedMqttClient();
+        }
+
+        public async Task StartAsync()
+        {
+            if (_isStarted) return;
 
             var options = new ManagedMqttClientOptionsBuilder()
                 .WithAutoReconnectDelay(TimeSpan.FromSeconds(5))
                 .WithClientOptions(new MqttClientOptionsBuilder()
-                .WithClientId(_mqttSettings.Id)
+                    .WithClientId(_mqttSettings.Id)
                     .WithTcpServer(_mqttSettings.Host, _mqttSettings.Port)
-                    .WithCredentials(_mqttSettings.User,_mqttSettings.Pass)
+                    //.WithCredentials(_mqttSettings.User, _mqttSettings.Pass)
                     .Build())
                 .Build();
 
-            _mqttClient.StartAsync(options).GetAwaiter().GetResult();
             _mqttClient.ApplicationMessageReceivedAsync += HandleReceivedMessage;
+            await _mqttClient.StartAsync(options);
+            await SubscribeAsync("#");
+            _mqttClient.ConnectedAsync += e =>
+            {
+                Console.WriteLine("✅ Connected ke broker");
+                return Task.CompletedTask;
+            };
+
+            _mqttClient.DisconnectedAsync += e =>
+            {
+                Console.WriteLine("❌ Disconnected dari broker");
+                return Task.CompletedTask;
+            };
+
+            _mqttClient.ConnectingFailedAsync += e =>
+            {
+                Console.WriteLine($"❌ Gagal connect: {e.Exception}");
+                return Task.CompletedTask;
+            };
+
+            _mqttClient.ApplicationMessageProcessedAsync += e =>
+            {
+                Console.WriteLine("📤 Message berhasil diproses dari queue");
+                return Task.CompletedTask;
+            };
+            _mqttClient.ApplicationMessageProcessedAsync += e =>
+            {
+                Console.WriteLine("📤 TERKIRIM ke broker");
+                return Task.CompletedTask;
+            };
+
+            _mqttClient.ApplicationMessageSkippedAsync += e =>
+            {
+                Console.WriteLine("⚠️ Message di-skip");
+                return Task.CompletedTask;
+            };
+            _isStarted = true;
+            Console.WriteLine("[MQTT] Client started and subscribed.");
         }
 
-        // Publish ke topic MQTT
-        public async Task PublishAsync(string topic, string payload)
+        public async Task PublishAsync<T>(string topic, T payload)
         {
-            if (string.IsNullOrEmpty(topic) || string.IsNullOrEmpty(payload))
-                throw new ArgumentException("Topic and payload cannot be null");
+            if (string.IsNullOrWhiteSpace(topic)) throw new ArgumentException("Topic cannot be empty");
+            if (payload == null) throw new ArgumentNullException(nameof(payload));
 
+            var json = JsonSerializer.Serialize(payload);
+            Console.WriteLine($"IsConnected: {_mqttClient.IsConnected}");
             var message = new MqttApplicationMessageBuilder()
                 .WithTopic(topic)
-                .WithPayload(payload)
-                .WithQualityOfServiceLevel(MQTTnet.Protocol.MqttQualityOfServiceLevel.ExactlyOnce)
+                .WithPayload(Encoding.UTF8.GetBytes(json))
+                .WithQualityOfServiceLevel(MqttQualityOfServiceLevel.AtMostOnce)
                 .Build();
 
+      
             await _mqttClient.EnqueueAsync(message);
+            Console.WriteLine("Masuk queue");
         }
 
-        // Subscribe ke topic
         public async Task SubscribeAsync(string topic)
         {
-            if (string.IsNullOrEmpty(topic))
-                topic = "#"; // subscribe semua topic
+            if (string.IsNullOrWhiteSpace(topic))
+                topic = "#";
 
-            var topicFilter = new MqttTopicFilterBuilder()
+            var filter = new MqttTopicFilterBuilder()
                 .WithTopic(topic)
-                .WithQualityOfServiceLevel(MQTTnet.Protocol.MqttQualityOfServiceLevel.AtMostOnce)
+                .WithQualityOfServiceLevel(MqttQualityOfServiceLevel.AtMostOnce)
                 .Build();
 
-            await _mqttClient.SubscribeAsync(new List<MqttTopicFilter> { topicFilter });
+            await _mqttClient.SubscribeAsync(new List<MqttTopicFilter> { filter });
         }
 
-        // Handle pesan masuk
         private async Task HandleReceivedMessage(MqttApplicationMessageReceivedEventArgs e)
         {
+            string topic = e.ApplicationMessage.Topic;
+            string payload = Encoding.UTF8.GetString(e.ApplicationMessage.PayloadSegment);
+
+            if (string.IsNullOrWhiteSpace(payload)) return;
+
+            MqttReceivedMessage data = null;
             try
             {
-                string topic = e.ApplicationMessage.Topic;
-                string payload = Encoding.UTF8.GetString(e.ApplicationMessage.Payload);
-                using var scope = _scopeFactory.CreateScope();
-                var contex = scope.ServiceProvider.GetRequiredService<IIdentityDataAndonService>();
-                if (string.IsNullOrWhiteSpace(payload))
-                    return;
-
-                MqttReceivedMessage data = null;
-                try
-                {
-                    data = JsonSerializer.Deserialize<MqttReceivedMessage>(payload);
-                }
-                catch (JsonException)
-                {
-                    if(topic == "conveyor/speed")
-                    {
-                        int da = int.Parse(payload);
-                        await contex.UpdateCounting(CancellationToken.None, true, da);
-                        //Console.WriteLine($"Invalid JSON payload: {payload}");
-                        //return;
-
-                    }
-
-                    Console.WriteLine($"Invalid JSON payload: {payload}");
-                    return;
-                }
-
-                if (data != null)
-                {
-                    // Gunakan scope untuk scoped service
-
-                    Console.WriteLine("data MQtt", data.ToString() );
-                    if (data.id == "CT")
-                        await contex.UpdateDetail(CancellationToken.None);
-                    else if (data.id == "TR")
-                        await contex.UpdateCounting(CancellationToken.None,false, 0 );
-                   if (data.id == "STATUS")
-                    {
-                        if(data.value == 0 && _startTime == null)
-                        {
-                            _startTime = DateTime.Now;
-                            
-                        }else if( data.value == 1 && _startTime != null){
-                            _startTime = null;
-                            TimeSpan? durationNullable = DateTime.Now - _startTime;
-                            TimeOnly timeStop = TimeOnly.FromTimeSpan(durationNullable.Value);
-                            int dataStop = BulatkanKeMenitTerdekat(timeStop);
-                            await contex.AddTimeStop(CancellationToken.None, dataStop);
-
-
-                        }
-
-
-                        
-                    }
-                        
-                }
-
-
-
-
-                // Notify listener lain
-                MessageReceived?.Invoke(payload);
-                Console.WriteLine($"[MQTT] Topic: {topic}, Payload: {payload}");
+                data = JsonSerializer.Deserialize<MqttReceivedMessage>(payload);
             }
-            catch (Exception ex)
+            catch (JsonException)
             {
-                Console.WriteLine($"[MQTT Error] {ex.Message}");
+                if (topic == "conveyor/speed")
+                {
+                    int speed = int.Parse(payload);
+                    await HandleSpeedAsync(speed);
+                }
+                Console.WriteLine($"Invalid JSON payload: {payload}");
+                return;
+            }
+
+            if (data != null)
+            {
+                using var scope = _scopeFactory.CreateScope();
+                var context = scope.ServiceProvider.GetRequiredService<IIdentityDataAndonService>();
+
+                if (data.id == "CT")
+                {
+                    await context.UpdateDetail(CancellationToken.None);
+                    Console.WriteLine($"[CT] {topic}: {payload}");
+                }
+                else if (data.id == "TR")
+                {
+                    await context.UpdateCounting(CancellationToken.None, false, 0);
+                    Console.WriteLine($"[TR] {topic}: {payload}");
+                }
+                else if (data.id == "STATUS")
+                {
+                    if (data.value == 0 && _startTime == null)
+                        _startTime = DateTime.Now;
+                    else if (data.value == 1 && _startTime != null)
+                    {
+                        TimeSpan duration = DateTime.Now - _startTime.Value;
+                        int minutes = BulatkanKeMenitTerdekat(TimeOnly.FromTimeSpan(duration));
+                        await context.AddTimeStop(CancellationToken.None, minutes);
+                        _startTime = null;
+                    }
+                }
+            }
+
+            MessageReceived?.Invoke(payload);
+        }
+
+        private async Task HandleSpeedAsync(int speed)
+        {
+            lock (_speedBuffer)
+            {
+                _speedBuffer.Add(speed);
+
+                if (DateTime.UtcNow - _lastSpeedSaveTime >= _speedInterval)
+                {
+                    int avgSpeed = (int)_speedBuffer.Average();
+                    _speedBuffer.Clear();
+                    _lastSpeedSaveTime = DateTime.UtcNow;
+
+                    Task.Run(async () =>
+                    {
+                        using var scope = _scopeFactory.CreateScope();
+                        var context = scope.ServiceProvider.GetRequiredService<IIdentityDataAndonService>();
+                        await context.UpdateCounting(CancellationToken.None, true, avgSpeed);
+                        Console.WriteLine($"Average speed saved: {avgSpeed}");
+                    });
+                }
             }
         }
-        int BulatkanKeMenitTerdekat(TimeOnly time)
+
+        private int BulatkanKeMenitTerdekat(TimeOnly time)
         {
             int menit = time.Minute;
-            int detik = time.Second;
-
-            if (detik >= 30) // jika detik >= 30, naik ke menit berikut
-                menit++;
-
-            int totalMenit = time.Hour * 60 + menit; // hitung total menit
-            return totalMenit;
+            if (time.Second >= 30) menit++;
+            return time.Hour * 60 + menit;
         }
 
+        public void Dispose()
+        {
+            _mqttClient?.Dispose();
+            Console.WriteLine("[MQTT] Client disposed.");
+        }
 
-    }
+        public class MqttSettings
+        {
+            public string Id { get; set; }
+            public string Host { get; set; }
+            public int Port { get; set; }
+            public string User { get; set; }
+            public string Pass { get; set; }
+            public string Topik { get; set; }
+        }
 
-    // Config MQTT Broker
-    public class MqttSettings
-    {
-        public string Id{ get; set; }
-        public string Host { get; set; }
-        public int Port { get; set; }
-        public string User { get; set; }
-        public string Pass { get; set; }
-        public string Topik { get; set; }
-    }
-
-    // Model JSON MQTT
-    public class MqttReceivedMessage
-    {
-        public string id { get; set; }
-        public int value { get; set; }
+        public class MqttReceivedMessage
+        {
+            public string id { get; set; }
+            public int value { get; set; }
+        }
     }
 }
